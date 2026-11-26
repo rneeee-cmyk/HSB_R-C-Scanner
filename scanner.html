@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HSB QR Code 掃描測試</title>
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;background:#edf3fa;color:#172b49;font:1rem/1.5 system-ui,"Microsoft JhengHei",sans-serif}
+    main{max-width:34rem;margin:auto;padding:24px 16px env(safe-area-inset-bottom,16px)}
+    h1{font-size:1.5rem;margin:0 0 14px}
+    section{background:white;border:1px solid #cad8e9;border-radius:12px;padding:14px;margin-bottom:12px}
+    .buttons{display:flex;gap:8px;flex-wrap:wrap}
+    button,input,select{font:inherit;min-height:44px}
+    button{padding:8px 13px;border-radius:8px;border:1px solid #b4c6dd;background:white;color:#172b49;font-weight:650;cursor:pointer}
+    button.primary{background:#174fb6;border-color:#174fb6;color:white}
+    button:disabled{opacity:.55;cursor:default}
+    button:focus-visible,input:focus-visible{outline:2px solid #1b61dc;outline-offset:2px}
+    #reader{margin-top:10px;border-radius:8px;overflow:hidden}
+    #reader:empty{margin-top:0}
+    #reader video{display:block;max-width:100%}
+    #status{min-height:1.5em;margin:10px 0 0;font-size:.875rem}
+    #status[data-error="true"]{color:#98272a}
+    .result{background:#e9f7ee;border-color:#a9d6b9}
+    .fallback-active{border-color:#174fb6;box-shadow:0 0 0 1px #174fb6}
+    #lookup-status{margin:5px 0 0;font-size:.875rem}
+    output{display:block;font:bold 1.5rem ui-monospace,monospace;overflow-wrap:anywhere}
+    form{display:flex;align-items:end;gap:8px;margin-top:12px}
+    label{flex:1;min-width:0;display:grid;gap:4px;font-size:.875rem;font-weight:650}
+    input[type=text],select{width:100%;border:1px solid #b4c6dd;border-radius:8px;padding:8px;background:white;color:inherit}
+    .engine{margin-bottom:10px}
+    .diagnostics{font-size:.875rem}
+    .diagnostics dl{display:grid;gap:4px;margin:8px 0 0}
+    .diagnostics dt{font-weight:650}
+    .diagnostics dd{margin:0 0 6px;overflow-wrap:anywhere}
+    #raw-result{margin:4px 0;background:#f2f6fc;padding:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+    .file-picker{position:absolute;width:1px;height:1px;min-height:0;opacity:0;pointer-events:none}
+    [hidden]{display:none!important}
+  </style>
+  <script defer src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>HSB QR Code 掃描測試</h1>
+  <section aria-label="相機掃描">
+    <label class="engine">辨識引擎
+      <select id="engine"><option value="zxing">ZXing Browser</option><option value="html5">Html5Qrcode</option></select>
+    </label>
+    <div class="buttons">
+      <button id="start" class="primary" type="button">開始掃描</button>
+      <button id="stop" type="button" disabled>停止掃描</button>
+    </div>
+    <div id="reader"></div>
+    <p id="status" role="status" aria-live="polite">開始掃描後，將 QR Code 放在畫面中央。</p>
+  </section>
+  <section class="diagnostics" aria-label="辨識診斷">
+    <strong>辨識診斷</strong>
+    <dl>
+      <dt>函式庫</dt><dd id="libraries">載入中</dd>
+      <dt>相機實際解析度</dt><dd id="resolution">尚未取得</dd>
+      <dt>原始解碼內容 <span id="raw-length"></span></dt><dd><pre id="raw-result">—</pre></dd>
+      <dt>最後回報的錯誤</dt><dd id="decode-error">—</dd>
+    </dl>
+  </section>
+  <section id="result-panel" class="result" hidden aria-label="掃描結果">
+    包裝 ID
+    <output id="result" aria-live="polite"></output>
+    <p id="lookup-status" role="status" aria-live="polite"></p>
+  </section>
+  <section id="fallback" aria-label="備用輸入方式">
+    <div class="buttons">
+      <button id="capture" type="button">拍照辨識</button>
+      <button id="upload" type="button">上傳照片辨識</button>
+    </div>
+    <input id="photo" class="file-picker" type="file" accept="image/*" capture="environment" tabindex="-1" aria-label="拍照辨識">
+    <input id="file" class="file-picker" type="file" accept="image/*" tabindex="-1" aria-label="上傳照片辨識">
+    <form id="manual">
+      <label>手動輸入包裝 ID
+        <input id="package-id" type="text" placeholder="PK0002" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="18" required>
+      </label>
+      <button type="submit">確認</button>
+    </form>
+  </section>
+</main>
+<script>
+  'use strict';
+  const $ = id => document.getElementById(id);
+  let reader, controls, phase = 'idle', stopRequested = false, pendingResult = null, lookupVersion = 0;
+  let lastErrorAt = 0;
+  const engines = {zxing:'ZXing Browser',html5:'Html5Qrcode'};
+
+  function libraryStatus() {
+    $('libraries').textContent = [
+      'ZXing Browser 0.1.5 ' + (typeof globalThis.ZXingBrowser?.BrowserQRCodeReader === 'function' ? '已載入' : '未載入'),
+      'Html5Qrcode 2.3.8 ' + (typeof globalThis.Html5Qrcode === 'function' ? '已載入' : '未載入')
+    ].join(' · ');
+  }
+
+  function diagnosticError(engine, error, force = false) {
+    if (!force && Date.now() - lastErrorAt < 600) return;
+    lastErrorAt = Date.now();
+    const name = error?.name, detail = error?.message || (typeof error === 'string' ? error : '');
+    $('decode-error').textContent = engines[engine] + ' · ' +
+      ([name, detail].filter(Boolean).join('：') || '引擎未提供錯誤細節');
+  }
+
+  function resetDiagnostics(camera = false) {
+    lastErrorAt = 0;
+    $('decode-error').textContent = $('raw-result').textContent = '—';
+    $('raw-length').textContent = '';
+    if (camera) $('resolution').textContent = '尚未取得';
+  }
+
+  function cameraResolution(video = $('reader').querySelector('video')) {
+    if (!video) return;
+    const settings = video.srcObject?.getVideoTracks?.()[0]?.getSettings?.();
+    const frame = video.videoWidth && video.videoHeight ? '影格 ' + video.videoWidth + ' × ' + video.videoHeight : '';
+    const track = settings?.width && settings?.height ? '相機軌道 ' + settings.width + ' × ' + settings.height : '';
+    if (frame || track) $('resolution').textContent = [track,frame].filter(Boolean).join(' · ');
+  }
+
+  function showDecoded(raw, method) {
+    $('raw-result').textContent = raw;
+    $('raw-length').textContent = '（' + raw.length + ' 字元）';
+    $('decode-error').textContent = '—';
+    const id = packageId(raw);
+    if (id) showResult(id, method);
+    else {
+      $('package-id').value = '';
+      feedback(method + ' 已保留原始結果供檢查。');
+    }
+  }
+
+  function feedback(message, error = false) {
+    $('status').textContent = message;
+    $('status').dataset.error = String(error);
+  }
+
+  function setPhase(next) {
+    phase = next;
+    const idle = phase === 'idle';
+    $('start').disabled = $('capture').disabled = $('upload').disabled = !idle;
+    $('engine').disabled = !idle;
+    $('stop').disabled = !['starting', 'live'].includes(phase);
+    $('package-id').disabled = $('manual').querySelector('button').disabled = !idle;
+  }
+
+  function packageId(value) {
+    const id = String(value ?? '').trim().toUpperCase();
+    const serial = /^PK[0-9]{4,}$/.test(id) ? Number(id.slice(2)) : 0;
+    return Number.isSafeInteger(serial) && serial > 0 && id === 'PK' + String(serial).padStart(4, '0') ? id : '';
+  }
+
+  function showResult(id, method) {
+    $('package-id').value = id;
+    $('result').textContent = id;
+    $('result-panel').hidden = false;
+    feedback(method);
+    const version = ++lookupVersion;
+    const lookup = $('lookup-status');
+    const run = globalThis.google?.script?.run;
+    if (!run) {
+      lookup.textContent = '透過 GAS 測試網址開啟後可核對包裝 ID。';
+      return;
+    }
+    lookup.textContent = '正在唯讀核對包裝 ID…';
+    run.withSuccessHandler(result => {
+      if (version !== lookupVersion) return;
+      lookup.textContent = result.found ? '已在庫存明細找到此包裝。' : '庫存明細查無此包裝。';
+    }).withFailureHandler(error => {
+      if (version === lookupVersion) lookup.textContent = '核對失敗：' + (error?.message || String(error));
+    }).lookupScannerTestPackage(id);
+  }
+
+  function hideResult() {
+    lookupVersion++;
+    $('result-panel').hidden = true;
+    $('lookup-status').textContent = '';
+  }
+
+  function cameraPolicyBlocked() {
+    const policy = document.permissionsPolicy || document.featurePolicy;
+    return policy?.allowsFeature?.('camera') === false;
+  }
+
+  function cameraFailure(error) {
+    const name = String(error?.name || '');
+    const detail = String(error?.message ?? error ?? '');
+    const cause = name + ' ' + detail;
+    if (cameraPolicyBlocked() || /permissions? policy|feature policy/i.test(cause)) {
+      return '目前頁面的 iframe 權限政策禁止使用相機（Permissions Policy: camera）。';
+    }
+    if (/NotAllowedError|PermissionDenied|permission denied/i.test(cause)) {
+      return '即時相機權限遭拒（NotAllowedError）。瀏覽器或 GAS iframe 可能限制相機，請檢查網站權限。';
+    }
+    if (/NotFoundError|DevicesNotFound|OverconstrainedError/i.test(cause)) return '找不到符合條件的後置相機。';
+    if (/NotReadableError|TrackStartError|Could not start video source/i.test(cause)) return '相機無法讀取，可能正被其他頁面或應用程式使用。';
+    if (/SecurityError/i.test(cause)) return '當前文件的相機功能被瀏覽器安全設定停用（SecurityError）。';
+    return detail || '瀏覽器沒有提供相機錯誤細節。';
+  }
+
+  function showPhotoFallback(reason) {
+    feedback(reason + ' 已切換至備用區，請點「拍照辨識」或上傳照片。', true);
+    $('fallback').classList.add('fallback-active');
+    $('capture').focus();
+  }
+
+  function getReader(engine) {
+    if (engine === 'zxing' && typeof globalThis.ZXingBrowser?.BrowserQRCodeReader === 'function') {
+      return new ZXingBrowser.BrowserQRCodeReader();
+    }
+    if (engine === 'html5' && typeof globalThis.Html5Qrcode === 'function') {
+      return new Html5Qrcode('reader', {formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE]});
+    }
+    throw new Error(engines[engine] + ' 未載入。請檢查網路或切換引擎。');
+  }
+
+  function resetReader() {
+    const video = $('reader').querySelector('video');
+    controls = null;
+    video?.srcObject?.getTracks().forEach(track => track.stop());
+    try { reader?.clear(); } catch (_) { /* The view can also be cleared directly. */ }
+    $('reader').replaceChildren();
+    reader = null;
+  }
+
+  async function stopCamera() {
+    if (phase !== 'live') return;
+    setPhase('stopping');
+    const result = pendingResult;
+    try {
+      if (controls) controls.stop();
+      else await reader?.stop?.();
+    } catch(error) { diagnosticError($('engine').value,error,true); }
+    finally {
+      resetReader();
+      setPhase('idle');
+      if (result) showDecoded(result.raw,'辨識成功，相機已停止。');
+      else feedback('相機已停止。');
+    }
+  }
+
+  function receiveCode(text) {
+    if (!['starting', 'live'].includes(phase) || stopRequested || pendingResult) return;
+    cameraResolution();
+    pendingResult = {raw:String(text)};
+    if (phase === 'live') void stopCamera().catch(() => {});
+  }
+
+  async function startCamera() {
+    if (phase !== 'idle') return;
+    const engine = $('engine').value;
+    resetDiagnostics(true);
+    if (cameraPolicyBlocked()) {
+      const reason=cameraFailure();
+      diagnosticError(engine,reason,true);
+      showPhotoFallback(reason);
+      return;
+    }
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      const reason=window.isSecureContext ? '目前瀏覽器無法使用 getUserMedia。' : '目前頁面缺少 HTTPS 安全環境。';
+      diagnosticError(engine,reason,true);
+      showPhotoFallback(reason);
+      return;
+    }
+    pendingResult = null;
+    stopRequested = false;
+    hideResult();
+    $('fallback').classList.remove('fallback-active');
+    setPhase('starting');
+    feedback('正在開啟相機，請允許相機權限。');
+    try {
+      reader = getReader(engine);
+      if (engine === 'zxing') {
+        const video=document.createElement('video');
+        video.playsInline=true; video.muted=true; video.autoplay=true;
+        $('reader').append(video);
+        video.addEventListener('loadedmetadata',()=>cameraResolution(video),{once:true});
+        controls=await reader.decodeFromConstraints({audio:false,video:{facingMode:{ideal:'environment'}}},video,
+          (result,error)=>{
+            cameraResolution(video);
+            if(result)receiveCode(result.getText());
+            else if(error)diagnosticError(engine,error);
+          });
+      } else {
+        await reader.start({facingMode:'environment'},{fps:8},receiveCode,error=>{
+          cameraResolution();
+          if(error)diagnosticError(engine,error);
+        });
+      }
+      cameraResolution();
+      setPhase('live');
+    } catch (error) {
+      diagnosticError(engine,error,true);
+      resetReader();
+      setPhase('idle');
+      showPhotoFallback(cameraFailure(error));
+      return;
+    }
+    if (pendingResult || stopRequested) {
+      await stopCamera().catch(() => {});
+      return;
+    }
+    feedback('掃描中。請將包裝標籤放在畫面中央，保持穩定。');
+  }
+
+  function requestStop() {
+    if (phase === 'starting') {
+      stopRequested = true;
+      feedback('相機啟動完成後將停止。');
+    } else if (phase === 'live') void stopCamera().catch(() => {});
+  }
+
+  $('start').addEventListener('click', startCamera);
+  $('stop').addEventListener('click', requestStop);
+  $('capture').addEventListener('click', () => $('photo').click());
+  $('upload').addEventListener('click', () => $('file').click());
+  async function scanPhoto(event) {
+    const file = event.target.files[0];
+    event.target.value = '';
+    if (!file || phase !== 'idle') return;
+    hideResult();
+    setPhase('file');
+    resetDiagnostics();
+    feedback('正在辨識照片…');
+    const engine=$('engine').value;
+    let url;
+    try {
+      reader=getReader(engine);
+      if(engine==='zxing'){
+        url=URL.createObjectURL(file);
+        const result=await reader.decodeFromImageUrl(url);
+        showDecoded(result.getText(),'照片辨識成功。');
+      } else {
+        showDecoded(await reader.scanFile(file,false),'照片辨識成功。');
+      }
+    } catch (error) {
+      diagnosticError(engine,error,true);
+      const detail = String(error?.message ?? error);
+      feedback(detail.includes('未載入') ? detail : '無法辨識照片。請上傳清楚的標籤圖片，或手動輸入。', true);
+    } finally {
+      if(url)URL.revokeObjectURL(url);
+      resetReader();
+      setPhase('idle');
+    }
+  }
+  $('photo').addEventListener('change', scanPhoto);
+  $('file').addEventListener('change', scanPhoto);
+  $('manual').addEventListener('submit', event => {
+    event.preventDefault();
+    if (phase !== 'idle') return;
+    const id = packageId($('package-id').value);
+    if (id) showResult(id, '已確認手動輸入。');
+    else {
+      hideResult();
+      feedback('請輸入有效的包裝 ID，例如 PK0002。', true);
+      $('package-id').focus();
+    }
+  });
+  window.addEventListener('pagehide', requestStop);
+  window.addEventListener('load', libraryStatus);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && phase === 'live') requestStop();
+  });
+</script>
+</body>
+</html>
