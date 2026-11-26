@@ -6,8 +6,8 @@
 <title>HSB 包裝掃碼</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#0a0b0e;color:white;font:16px system-ui,sans-serif}
-video,svg{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
-svg{z-index:1}.guide{position:fixed;top:48%;left:50%;transform:translate(-50%,-50%);width:min(62vw,42vh);aspect-ratio:1;border:2px solid #ffd826;border-radius:16px;pointer-events:none}
+video,#scan-frame,svg{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;object-position:center;pointer-events:none}
+svg{z-index:1}.guide{position:fixed;top:48%;left:50%;transform:translate(-50%,-50%);width:min(62vw,42vh);aspect-ratio:1;border:2px solid rgba(255,216,38,.32);border-radius:16px;pointer-events:none}
 .guide[hidden]{display:none}.success{position:fixed;top:48%;left:50%;transform:translate(-50%,-50%);color:#7bffa9;background:#143722;border-radius:50%;padding:.15em .45em;font-size:3rem;z-index:2}
 header,footer{position:fixed;z-index:3;left:0;right:0;padding:16px;background:#0a0b0ee8}
 header{top:0;padding-top:max(16px,env(safe-area-inset-top));display:flex;align-items:center;justify-content:space-between}
@@ -17,7 +17,10 @@ output{display:block;font-weight:bold;overflow-wrap:anywhere}pre{white-space:pre
 </style>
 <video id="video" autoplay muted playsinline></video>
 <div id="guide" class="guide" aria-hidden="true"></div>
-<svg id="points" aria-hidden="true"></svg>
+<svg id="outline" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+  <polygon id="qr-corners" fill="none" stroke="#ffd826" stroke-width="3"
+    stroke-linejoin="round" vector-effect="non-scaling-stroke"></polygon>
+</svg>
 <div id="success" class="success" hidden aria-hidden="true">✓</div>
 <header><strong>HSB 包裝掃碼</strong><button id="back" type="button">取消／返回</button></header>
 <footer>
@@ -28,6 +31,7 @@ output{display:block;font-weight:bold;overflow-wrap:anywhere}pre{white-space:pre
   <pre id="debug" hidden></pre>
 </footer>
 <script src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js"></script>
+<script async src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
@@ -71,24 +75,47 @@ window.addEventListener('message',event=>{
     setTimeout(()=>window.close(),350);
   }else status('HSB 未帶入此包裝。請返回查看原因，或複製包裝 ID。');
 });
-function drawPoints(result){
-  const points=result.getResultPoints?.()||[];
-  if(!video.videoWidth||!video.videoHeight||points.length<3)return;
-  const svg=$('points');
-  svg.setAttribute('viewBox','0 0 '+video.videoWidth+' '+video.videoHeight);
-  // ZXing reports finder centers, not the four outer corners.
-  for(const point of points){
-    const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');
-    circle.setAttribute('cx',point.getX());
-    circle.setAttribute('cy',point.getY());
-    circle.setAttribute('r','12');
-    circle.setAttribute('fill','none');
-    circle.setAttribute('stroke','#ffd826');
-    circle.setAttribute('stroke-width','4');
-    svg.append(circle);
-  }
+function qrSearchRegion(frame,result){
+  const [bottomLeft,topLeft,topRight]=result.getResultPoints?.()||[];
+  if(!bottomLeft||!topLeft||!topRight)return [0,0,frame.width,frame.height];
+  const xs=[bottomLeft.getX(),topLeft.getX(),topRight.getX()];
+  const ys=[bottomLeft.getY(),topLeft.getY(),topRight.getY()];
+  // Estimate the fourth finder position only to bound the pixel search.
+  xs.push(xs[0]+xs[2]-xs[1]);
+  ys.push(ys[0]+ys[2]-ys[1]);
+  const margin=.45*Math.max(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys));
+  const x=Math.max(0,Math.floor(Math.min(...xs)-margin));
+  const y=Math.max(0,Math.floor(Math.min(...ys)-margin));
+  return [x,y,Math.min(frame.width,Math.ceil(Math.max(...xs)+margin))-x,
+    Math.min(frame.height,Math.ceil(Math.max(...ys)+margin))-y];
 }
-function decoded(result,active){
+function drawOutline(frame,result){
+  if(!frame?.width||!frame.height||typeof globalThis.jsQR!=='function')return;
+  const [x,y,width,height]=qrSearchRegion(frame,result);
+  if(width<1||height<1)return;
+  const sample=document.createElement('canvas');
+  const scale=Math.min(1,640/Math.max(width,height));
+  sample.width=Math.max(1,Math.round(width*scale));
+  sample.height=Math.max(1,Math.round(height*scale));
+  const context=sample.getContext('2d');
+  if(!context)return;
+  context.drawImage(frame,x,y,width,height,0,0,sample.width,sample.height);
+  const image=context.getImageData(0,0,sample.width,sample.height);
+  const code=globalThis.jsQR(image.data,image.width,image.height,{inversionAttempts:'dontInvert'});
+  if(code?.data!==result.getText())return;
+  const {topLeftCorner,topRightCorner,bottomRightCorner,bottomLeftCorner}=code.location;
+  const corners=[topLeftCorner,topRightCorner,bottomRightCorner,bottomLeftCorner];
+  if(!corners.every(p=>Number.isFinite(p?.x)&&Number.isFinite(p?.y)))return;
+  $('outline').setAttribute('viewBox','0 0 '+frame.width+' '+frame.height);
+  $('qr-corners').setAttribute('points',corners.map(p=>
+    (x+p.x*width/sample.width)+','+(y+p.y*height/sample.height)).join(' '));
+  // Keep the decoded frame under the polygon even when the camera stops.
+  frame.id='scan-frame';
+  frame.setAttribute('aria-hidden','true');
+  video.after(frame);
+  $('guide').hidden=true;
+}
+function decoded(result,active,frame){
   if(stopped||finished)return;
   const text=result.getText().trim().toUpperCase();
   if(!/^(?:PK|D)\d{4,16}$/.test(text)){
@@ -98,8 +125,7 @@ function decoded(result,active){
   }
   finished=true;
   id=text;
-  drawPoints(result);
-  $('guide').hidden=true;
+  try{drawOutline(frame,result);}catch(error){log('定位框：'+error.message);}
   $('success').hidden=false;
   $('result').textContent=id;
   $('result').hidden=$('copy').hidden=false;
@@ -129,10 +155,17 @@ async function start(){
   try{
     if(!globalThis.ZXingBrowser?.BrowserQRCodeReader)throw new Error('ZXing 載入失敗，請檢查網路後重新開啟掃碼頁。');
     const reader=new ZXingBrowser.BrowserQRCodeReader();
+    let decodedFrame;
+    const decodeFrame=reader.decodeFromCanvas.bind(reader);
+    reader.decodeFromCanvas=frame=>{
+      const result=decodeFrame(frame);
+      decodedFrame=frame;
+      return result;
+    };
     controls=await reader.decodeFromConstraints({audio:false,video:{
       facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}
     }},video,(result,error,active)=>{
-      if(result){decoded(result,active);return;}
+      if(result){decoded(result,active,decodedFrame);return;}
       if(debug&&error&&Date.now()-lastError>800){
         lastError=Date.now();
         log(JSON.stringify(video.srcObject?.getVideoTracks()[0]?.getSettings?.()||{},null,2)+
